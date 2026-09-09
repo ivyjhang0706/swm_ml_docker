@@ -1,0 +1,19 @@
+services:
+  ml:
+    build: .
+    image: ml:1.0
+    container_name: ml
+    volumes:
+      - /share:/share            
+    ports:
+      - "2222:22"                # 主機的 22 已被主機自己的 sshd 佔用，container 的 sshd 改對外開 2222
+    tty: true
+    stdin_open: true
+    command: tail -f /dev/null
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
