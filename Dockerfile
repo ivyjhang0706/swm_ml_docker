@@ -56,38 +56,47 @@ ENV CONDA_DIR=/opt/conda
 ENV PATH=$CONDA_DIR/bin:$PATH
 COPY --from=conda /opt/conda /opt/conda
 
-# 共用的基礎環境，所有人登入預設都在這裡，requirements.txt 裝的套件都在這。
-# 個人如果有特殊套件需求，自己 clone 一份出去裝，不要直接動這個共用 env：
-#   conda create --clone ml -n <你的名字>
-# clone 是本地複製，base 已經裝好的套件不用重新下載/安裝，之後手動 conda activate <你的名字> 即可。
-RUN conda create -y -n ml python=3.10 \
-    && conda clean -afy
-
-# 把預設 PATH 直接指到 ml env 的 bin，讓 `docker compose exec ml python ...`
-# 這種不經過登入 shell（不會跑 /etc/profile.d）的用法，也直接拿到裝好 requirements 的 python，
-# 不會落到什麼都沒裝的 conda base env。
-ENV PATH=$CONDA_DIR/envs/ml/bin:$PATH
-
 EXPOSE 22
 
 WORKDIR /share
 
 COPY requirements.txt .
 
-# torch/torchvision/torchaudio use the +cu121 local version tag, only published on
-# PyTorch's own wheel index, so it must be added as an extra index for pip.
-RUN $CONDA_DIR/envs/ml/bin/pip install --upgrade pip \
-    && $CONDA_DIR/envs/ml/bin/pip install -r requirements.txt --extra-index-url https://download.pytorch.org/whl/cu121
+# 共用的基礎環境，所有人登入預設都在這裡，requirements.txt 裝的套件都在這（torch/torchvision/torchaudio
+# 用 +cu121 這個 local version tag，只有 PyTorch 自己的 wheel index 有，所以要另外加 extra-index-url）。
+# 個人如果有特殊套件需求，自己 clone 一份出去裝，不要直接動這個共用 env：
+#   conda create --clone ml -n <你的名字>
+# clone 是本地複製，base 已經裝好的套件不用重新下載/安裝，之後手動 conda activate <你的名字> 即可。
+#
+# conda create / pip install / 權限設定全部併在同一個 RUN 裡（同一層 layer）：如果權限設定拆成
+# 獨立的下一層，chgrp/chmod 會對已經寫進前一層的每個檔案觸發 overlay 的 copy-up，等於把整個
+# env 再複製一份到新層，直接讓 image 多出好幾 GB。併在同一層就不會有這個問題。
+# chgrp/chmod 也只動 envs/ 和 pkgs/（大家會寫入新 env、快取套件的地方），不動 conda 本身的
+# bin/lib——那些不需要群組可寫，範圍縮小也順便減少要動的檔案數。
+RUN conda create -y -n ml python=3.10 \
+    && conda clean -afy \
+    && $CONDA_DIR/envs/ml/bin/pip install --upgrade pip \
+    && $CONDA_DIR/envs/ml/bin/pip install -r requirements.txt --extra-index-url https://download.pytorch.org/whl/cu121 \
+    && mkdir -p $CONDA_DIR/pkgs \
+    && chgrp -R ml $CONDA_DIR/envs $CONDA_DIR/pkgs \
+    && chmod -R g+rwX $CONDA_DIR/envs $CONDA_DIR/pkgs \
+    && find $CONDA_DIR/envs $CONDA_DIR/pkgs -type d -exec chmod g+s {} \;
 
-# ml 群組共用 /opt/conda：讓群組成員都能在裡面建自己的 env、裝套件。
-# setgid 讓新建的檔案/資料夾自動繼承 ml 群組，不用每個人各自 chmod。
-RUN chgrp -R ml $CONDA_DIR \
-    && chmod -R g+rwX $CONDA_DIR \
-    && find $CONDA_DIR -type d -exec chmod g+s {} \;
+# 把預設 PATH 直接指到 ml env 的 bin，讓 `docker compose exec ml python ...`
+# 這種不經過登入 shell（不會跑 /etc/profile.d）的用法，也直接拿到裝好 requirements 的 python，
+# 不會落到什麼都沒裝的 conda base env。
+ENV PATH=$CONDA_DIR/envs/ml/bin:$PATH
 
 # 登入自動啟用共用 base env，不用自己 conda activate
+# 這個只對「純互動式」登入生效（單純 ssh 進來、沒帶指令）。ssh 只要有帶指令，像
+# `ssh host python train.py`，就不會跑 /etc/profile.d，PATH 會落回系統預設，抓不到這裡的 python。
 RUN echo '. /opt/conda/etc/profile.d/conda.sh && conda activate ml' > /etc/profile.d/ml-conda.sh \
     && chmod +x /etc/profile.d/ml-conda.sh
+
+# 上面那條補不到「ssh 帶指令」的情況，所以另外用 /etc/environment 補：這個檔案是 PAM
+# （sshd_config 開了 UsePAM yes）在每個 session 一開始就會套用的，不管有沒有帶指令、
+# 有沒有 tty 都會生效，讓 `ssh host python xxx.py` 這種用法也能直接抓到對的 python。
+RUN sed -i "s|^PATH=.*|PATH=\"$CONDA_DIR/envs/ml/bin:$CONDA_DIR/condabin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/usr/games:/usr/local/games\"|" /etc/environment
 
 # image 只包環境（conda + 套件 + sshd），不烤程式碼跟資料進去——
 # 程式碼跟資料一律靠 docker-compose.yml 的 /share bind mount 在執行期即時提供。
