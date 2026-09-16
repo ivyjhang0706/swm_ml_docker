@@ -1,3 +1,8 @@
+# 從官方 Miniforge image 借用裝好的 /opt/conda，不用 curl 下載安裝腳本——
+# GitHub release 的下載會被導到 release-assets.githubusercontent.com，這個 CDN 在這裡的網路環境
+# 速度很不穩定（實測會卡到 timeout），改用 docker pull 走 Docker Hub 的路徑快又穩。
+FROM condaforge/miniforge3:24.11.3-2 AS conda
+
 # CUDA 12.1 runtime + cuDNN8, matching the torch==2.5.1+cu121 wheels in requirements.txt
 FROM nvidia/cuda:12.1.1-cudnn8-runtime-ubuntu22.04
 
@@ -10,7 +15,6 @@ ENV DEBIAN_FRONTEND=noninteractive \
 # tini 給 ssh 開機用，git/build-essential 給少數要編譯的套件用。
 RUN apt-get update && apt-get install -y --no-install-recommends \
         curl \
-        bzip2 \
         ca-certificates \
         build-essential \
         libgl1 \
@@ -25,14 +29,14 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && sed -i 's/^#\?PermitRootLogin.*/PermitRootLogin no/' /etc/ssh/sshd_config \
     && sed -i 's/^#\?PasswordAuthentication.*/PasswordAuthentication no/' /etc/ssh/sshd_config \
     && groupadd ml \
-    && for u in ivy stella jane aegon dennis belle; do \
+    && for u in ivy stella jane aegon dennis belle stella_1 share; do \
            useradd -m -s /bin/bash -G ml "$u"; \
        done
 
 # 每人各自帳號、各自金鑰登入，不共用 root。公鑰本身不是機密，烤進公開 image 沒關係——
 # 只有對應私鑰的人才能登入。之後要加新人，往 pubkeys/ 加一個檔案、上面 for 迴圈加個名字就好。
 COPY pubkeys/ /tmp/pubkeys/
-RUN for u in ivy stella jane aegon dennis belle; do \
+RUN for u in ivy stella jane aegon dennis belle stella_1 share; do \
         mkdir -p /home/$u/.ssh \
         && cp /tmp/pubkeys/$u.pub /home/$u/.ssh/authorized_keys \
         && chmod 700 /home/$u/.ssh \
@@ -50,10 +54,7 @@ RUN echo 'cd "/share/$(whoami)" 2>/dev/null || true' > /etc/profile.d/ml-cd.sh \
 # 裝在 /opt/conda，env 裡的 Python 版本跟系統完全無關，之後要換版本只要改下面的 python=3.10。
 ENV CONDA_DIR=/opt/conda
 ENV PATH=$CONDA_DIR/bin:$PATH
-RUN curl -fsSL https://github.com/conda-forge/miniforge/releases/latest/download/Miniforge3-Linux-x86_64.sh -o /tmp/miniforge.sh \
-    && bash /tmp/miniforge.sh -b -p $CONDA_DIR \
-    && rm /tmp/miniforge.sh \
-    && conda clean -afy
+COPY --from=conda /opt/conda /opt/conda
 
 # 共用的基礎環境，所有人登入預設都在這裡，requirements.txt 裝的套件都在這。
 # 個人如果有特殊套件需求，自己 clone 一份出去裝，不要直接動這個共用 env：

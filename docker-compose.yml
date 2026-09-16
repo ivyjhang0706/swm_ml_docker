@@ -1,7 +1,7 @@
 services:
   ml:
     build: .
-    image: ml:1.0
+    image: swm:1.7
     container_name: ml
     volumes:
       - /share:/share            
